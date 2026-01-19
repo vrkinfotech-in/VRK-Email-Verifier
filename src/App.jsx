@@ -1,12 +1,28 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import Papa from 'papaparse';
+import { motion } from 'framer-motion';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { auth } from './firebase';
+import Auth from './components/Auth';
 
 function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // App State
   const [inputEmails, setInputEmails] = useState('');
   const [results, setResults] = useState([]);
   const [progress, setProgress] = useState(0);
   const [isProcessing, setIsProcessing] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+      setAuthLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
   const handleInputChange = (e) => {
     setInputEmails(e.target.value);
@@ -18,9 +34,8 @@ function App() {
     setIsProcessing(true);
     setResults([]);
     setProgress(0);
-    setStatusMessage('Preparing...');
+    setStatusMessage('Preparing verification engine...');
 
-    // Split by comma or newline and clean
     const emailList = inputEmails
       .split(/[\n,]/)
       .map(e => e.trim())
@@ -29,72 +44,47 @@ function App() {
     const total = emailList.length;
     let processed = 0;
     const newResults = [];
-
-    // Batch processing (to avoid browser freezing, though requests are async)
-    // We can do small batches or one by one. One by one gives better "streaming" feel for progress.
-    // For faster results, we can run 3-5 in parallel.
     const CONCURRENCY = 3;
 
     for (let i = 0; i < total; i += CONCURRENCY) {
-      const batch = emailList.slice(i, i + CONCURRENCY);
+      if (!auth.currentUser) break; // Security break
 
+      const batch = emailList.slice(i, i + CONCURRENCY);
       const promises = batch.map(async (email) => {
         try {
-          // Determine API URL (using relative path via proxy or absolute if configured)
-          // In development without emulation proxy, we might need full URL, but with proxy (firebase serve) relative works.
-          // Assuming we will deploy or use local emulator with rewrites.
-          // Fallback to local function port if on localhost and not proxied? 
-          // Let's assume standard relative path '/api/verify' which we set up in firebase.json rewrites.
-
           const response = await fetch('/api/verify', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+              'Content-Type': 'application/json',
+              // Optional: Pass Auth Token if backend secured later
+              // 'Authorization': `Bearer ${await user.getIdToken()}`
+            },
             body: JSON.stringify({ email })
           });
 
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-          }
-
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
           const data = await response.json();
-          return {
-            original: email,
-            ...data,
-            status: data.valid ? 'Valid' : 'Invalid'
-          };
+          return { original: email, ...data, status: data.valid ? 'Valid' : 'Invalid' };
         } catch (err) {
-          console.error(err);
-          return {
-            original: email,
-            email: email,
-            valid: false,
-            reason: "Request Failed / Error",
-            status: 'Error'
-          };
+          return { original: email, email, valid: false, reason: "Request Failed", status: 'Error' };
         }
       });
 
       const batchResults = await Promise.all(promises);
-
-      // Update state logic
-      // We shouldn't mutate state directly ideally, but for "streaming" we append
       newResults.push(...batchResults);
       processed += batch.length;
 
-      // Update Results and Progress
       setResults((prev) => [...prev, ...batchResults]);
       setProgress(Math.round((processed / total) * 100));
       setStatusMessage(`Processed ${processed} of ${total}`);
     }
 
     setIsProcessing(false);
-    setStatusMessage('Completed!');
+    setStatusMessage('Verification Complete!');
   };
 
   const downloadCSV = () => {
     if (results.length === 0) return;
-
-    // Format for CSV
     const csvData = results.map(r => ({
       Email: r.email || r.original,
       Status: r.status,
@@ -103,196 +93,212 @@ function App() {
       MX_Record: r.mx || '',
       SMTP_Message: r.smtp || ''
     }));
-
     const csv = Papa.unparse(csvData);
     const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
     const link = document.createElement('a');
-    const url = URL.createObjectURL(blob);
-    link.setAttribute('href', url);
-    link.setAttribute('download', 'email_verification_results.csv');
-    link.style.visibility = 'hidden';
-    document.body.appendChild(link);
+    link.href = URL.createObjectURL(blob);
+    link.download = `verification_results_${new Date().getTime()}.csv`;
     link.click();
-    document.body.removeChild(link);
   };
 
+  const handleLogout = () => {
+    signOut(auth);
+  };
+
+  if (authLoading) return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-cyan-500">Loading...</div>;
+  if (!user) return <Auth />;
+
   return (
-    <div className="min-h-screen bg-slate-900 text-white font-sans selection:bg-cyan-500 selection:text-white">
-      {/* Background Gradients */}
-      <div className="fixed inset-0 z-0 overflow-hidden pointer-events-none">
-        <div className="absolute top-[-10%] left-[-10%] w-96 h-96 bg-purple-600 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-blob"></div>
-        <div className="absolute top-[-10%] right-[-10%] w-96 h-96 bg-cyan-600 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-blob animation-delay-2000"></div>
-        <div className="absolute bottom-[-20%] left-[20%] w-96 h-96 bg-pink-600 rounded-full mix-blend-multiply filter blur-3xl opacity-20 animate-blob animation-delay-4000"></div>
+    <div className="min-h-screen bg-slate-950 text-white font-sans selection:bg-cyan-500 selection:text-white overflow-x-hidden">
+      {/* Dynamic Background */}
+      <div className="fixed inset-0 z-0 pointer-events-none">
+        <div className="absolute top-[-10%] left-[-10%] w-[500px] h-[500px] bg-indigo-600/20 rounded-full mix-blend-screen filter blur-3xl opacity-30 animate-pulse"></div>
+        <div className="absolute bottom-[-10%] right-[-10%] w-[600px] h-[600px] bg-cyan-600/20 rounded-full mix-blend-screen filter blur-3xl opacity-30 animate-pulse delay-700"></div>
+        <div className="absolute top-[40%] left-[30%] w-[300px] h-[300px] bg-purple-600/20 rounded-full mix-blend-screen filter blur-3xl opacity-20 animate-blob"></div>
       </div>
 
-      <div className="relative z-10 container mx-auto px-4 py-8 max-w-6xl">
-        {/* Header */}
-        <header className="mb-10 text-center">
-          <h1 className="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 mb-4">
-            Email Verifier Pro
-          </h1>
-          <p className="text-slate-400 text-lg max-w-2xl mx-auto">
-            Lifetime Free Bulk Email Verification. Validate syntax, MX records, and SMTP availability with accuracy.
-          </p>
-        </header>
+      <div className="relative z-10 container mx-auto px-4 py-6 max-w-7xl">
+        {/* Navbar */}
+        <nav className="flex justify-between items-center mb-12 backdrop-blur-md bg-slate-900/50 p-4 rounded-2xl border border-slate-800">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-400 to-purple-500"></div>
+            <span className="font-bold text-xl tracking-tight">EmailVerifier<span className="text-cyan-400">Pro</span></span>
+          </div>
+          <div className="flex items-center gap-4">
+            <span className="text-slate-400 text-sm hidden sm:inline">{user.email}</span>
+            <button onClick={handleLogout} className="px-4 py-2 rounded-lg text-sm font-medium bg-slate-800/80 hover:bg-slate-700 border border-slate-700 transition-colors">
+              Log Out
+            </button>
+          </div>
+        </nav>
 
-        <main className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-          {/* Input Section */}
-          <div className="lg:col-span-1 space-y-6">
-            <div className="bg-slate-800/50 backdrop-blur-xl border border-slate-700/50 rounded-2xl p-6 shadow-2xl">
-              <h2 className="text-xl font-semibold mb-4 text-cyan-50 flex items-center justify-between">
-                <span>Bulk Input</span>
-                <span className="text-xs bg-slate-700 text-cyan-300 px-2 py-1 rounded-full border border-cyan-900/50">Free Forever</span>
-              </h2>
+        {/* Hero & App */}
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5 }}
+          className="grid grid-cols-1 lg:grid-cols-12 gap-8"
+        >
+          {/* Left Panel: Input */}
+          <div className="lg:col-span-4 space-y-6">
+            <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800 rounded-3xl p-6 shadow-2xl relative overflow-hidden group">
+              <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-cyan-500 via-purple-500 to-pink-500"></div>
+
+              <div className="flex justify-between items-center mb-6">
+                <h2 className="text-2xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-white to-slate-400">Bulk Verify</h2>
+                <span className="px-3 py-1 rounded-full bg-cyan-500/10 text-cyan-400 text-xs font-bold border border-cyan-500/20">Free Forever</span>
+              </div>
 
               <textarea
-                className="w-full h-80 bg-slate-900/50 border border-slate-700 text-slate-300 rounded-xl p-4 focus:outline-none focus:ring-2 focus:ring-cyan-500 focus:border-transparent transition-all resize-none text-sm font-mono placeholder-slate-600"
-                placeholder="Paste your email list here...&#10;user@example.com&#10;hello@domain.com, test@site.org"
+                className="w-full h-[400px] bg-slate-950/50 border border-slate-800 text-slate-300 rounded-xl p-5 focus:outline-none focus:border-cyan-500/50 focus:ring-1 focus:ring-cyan-500/50 transition-all resize-none text-sm font-mono leading-relaxed placeholder-slate-600 custom-scrollbar"
+                placeholder={`Paste emails here (one per line)...\nalice@example.com\nbob@domain.com\n...`}
                 value={inputEmails}
                 onChange={handleInputChange}
                 disabled={isProcessing}
               ></textarea>
 
-              <div className="mt-6 flex flex-col gap-3">
+              <div className="mt-6 space-y-3">
                 <button
                   onClick={processEmails}
                   disabled={isProcessing || !inputEmails.trim()}
-                  className={`w-full py-3.5 px-6 rounded-xl font-bold text-white shadow-lg transition-all transform hover:scale-[1.02] active:scale-[0.98] ${isProcessing || !inputEmails.trim()
-                    ? 'bg-slate-700 text-slate-500 cursor-not-allowed'
-                    : 'bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 shadow-cyan-500/20'
+                  className={`w-full py-4 rounded-xl font-bold text-lg shadow-xl transition-all relative overflow-hidden ${isProcessing || !inputEmails.trim()
+                    ? 'bg-slate-800 text-slate-600 cursor-not-allowed'
+                    : 'bg-gradient-to-r from-cyan-600 to-purple-600 hover:from-cyan-500 hover:to-purple-500 text-white hover:shadow-cyan-500/25 hover:-translate-y-0.5'
                     }`}
                 >
-                  {isProcessing ? 'Verifying...' : 'Verify Emails'}
+                  {isProcessing ? (
+                    <span className="flex items-center justify-center gap-2">
+                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                      Verifying...
+                    </span>
+                  ) : 'Start Verification'}
                 </button>
 
-                <button
-                  onClick={downloadCSV}
-                  disabled={results.length === 0 || isProcessing}
-                  className={`w-full py-3.5 px-6 rounded-xl font-bold transition-all border ${results.length === 0 || isProcessing
-                    ? 'border-slate-700 text-slate-600 cursor-not-allowed bg-transparent'
-                    : 'border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:border-slate-500'
-                    }`}
-                >
-                  Download CSV
-                </button>
-              </div>
-
-              {/* Progress Status */}
-              {statusMessage && (
-                <div className="mt-4 p-3 bg-slate-900/50 rounded-lg text-sm text-center text-slate-400 border border-slate-700/50">
-                  {statusMessage}
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => setInputEmails('')}
+                    disabled={isProcessing}
+                    className="py-3 rounded-xl font-medium text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                  >
+                    Clear
+                  </button>
+                  <button
+                    onClick={downloadCSV}
+                    disabled={results.length === 0}
+                    className={`py-3 rounded-xl font-medium border transition-all ${results.length === 0 ? 'border-slate-800 text-slate-700' : 'border-slate-700 bg-slate-800/50 text-cyan-400 hover:bg-slate-800 hover:border-cyan-500/30'}`}
+                  >
+                    Export CSV
+                  </button>
                 </div>
-              )}
+              </div>
             </div>
           </div>
 
-          {/* Results Section */}
-          <div className="lg:col-span-2">
-            <div className="bg-slate-800/50 backdrop-blur-xl border border-slate-700/50 rounded-2xl p-6 shadow-2xl h-full flex flex-col">
-              <div className="flex justify-between items-center mb-6">
-                <h2 className="text-xl font-semibold text-cyan-50">Results</h2>
+          {/* Right Panel: Results */}
+          <div className="lg:col-span-8">
+            <div className="bg-slate-900/60 backdrop-blur-xl border border-slate-800 rounded-3xl p-6 shadow-2xl h-full flex flex-col relative">
 
-                {/* Progress Bar */}
-                <div className="w-48 bg-slate-700/50 rounded-full h-2.5 overflow-hidden">
-                  <div
-                    className="bg-gradient-to-r from-cyan-400 to-purple-500 h-2.5 rounded-full transition-all duration-300"
-                    style={{ width: `${progress}%` }}
-                  ></div>
+              {/* Status Bar */}
+              <div className="flex justify-between items-end mb-6">
+                <div>
+                  <h2 className="text-xl font-semibold text-white">Live Results</h2>
+                  <p className="text-sm text-slate-500">{statusMessage || "Ready to verify"}</p>
+                </div>
+                <div className="text-right">
+                  <div className="text-3xl font-mono font-bold text-cyan-400">{progress}%</div>
                 </div>
               </div>
 
-              <div className="flex-1 overflow-auto rounded-xl border border-slate-700/50 bg-slate-900/30 custom-scrollbar">
-                <table className="w-full text-left border-collapse">
-                  <thead className="bg-slate-900/80 sticky top-0 backdrop-blur-md z-10">
-                    <tr>
-                      <th className="p-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Email</th>
-                      <th className="p-4 text-xs font-bold text-slate-400 uppercase tracking-wider">Status</th>
-                      <th className="p-4 text-xs font-bold text-slate-400 uppercase tracking-wider hidden sm:table-cell">Reason</th>
-                      <th className="p-4 text-xs font-bold text-slate-400 uppercase tracking-wider hidden md:table-cell">MX</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-700/50">
-                    {results.length === 0 ? (
-                      <tr>
-                        <td colSpan="4" className="p-12 text-center text-slate-500 italic">
-                          No results yet. Start verification to see data here.
-                        </td>
+              {/* Progress Bar Line */}
+              <div className="h-1 w-full bg-slate-800 rounded-full overflow-hidden mb-6">
+                <motion.div
+                  initial={{ width: 0 }}
+                  animate={{ width: `${progress}%` }}
+                  className="h-full bg-gradient-to-r from-cyan-500 via-purple-500 to-pink-500"
+                />
+              </div>
+
+              {/* Table */}
+              <div className="flex-1 bg-slate-950/50 rounded-2xl border border-slate-800 overflow-hidden flex flex-col relative">
+                <div className="overflow-y-auto custom-scrollbar flex-1 p-2">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-slate-800/50 text-xs uppercase tracking-wider text-slate-500">
+                        <th className="p-4 font-semibold">Email Address</th>
+                        <th className="p-4 font-semibold">Checks</th>
+                        <th className="p-4 font-semibold text-right">Result</th>
                       </tr>
-                    ) : (
-                      results.map((r, idx) => (
-                        <tr key={idx} className="hover:bg-slate-800/50 transition-colors">
-                          <td className="p-4 text-sm font-medium text-slate-200">
-                            {r.email || r.original}
-                          </td>
-                          <td className="p-4">
-                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${r.valid
-                              ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-                              : 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-                              }`}>
-                              {r.valid ? 'Valid' : 'Invalid'}
-                            </span>
-                          </td>
-                          <td className="p-4 text-sm text-slate-400 hidden sm:table-cell">
-                            {r.reason || (r.valid ? 'Verified' : 'Unknown')}
-                          </td>
-                          <td className="p-4 text-xs text-slate-500 font-mono hidden md:table-cell">
-                            {r.mx || '-'}
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/30 text-sm">
+                      {results.length === 0 ? (
+                        <tr>
+                          <td colSpan="3" className="p-20 text-center text-slate-600">
+                            <div className="inline-block p-4 rounded-full bg-slate-900/50 mb-4 text-slate-700">
+                              <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+                            </div>
+                            <p>No data yet. Waiting for input...</p>
                           </td>
                         </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
+                      ) : (
+                        results.map((r, i) => (
+                          <motion.tr
+                            initial={{ opacity: 0, x: -10 }}
+                            animate={{ opacity: 1, x: 0 }}
+                            transition={{ delay: i * 0.05 }}
+                            key={i}
+                            className="group hover:bg-slate-900/80 transition-colors"
+                          >
+                            <td className="p-4 font-mono text-slate-300">{r.email || r.original}</td>
+                            <td className="p-4">
+                              <div className="flex gap-2">
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${r.mx ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/10' : 'border-slate-700 text-slate-600'}`}>MX</span>
+                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${r.smtp && !r.smtp.includes('Error') ? 'border-emerald-500/30 text-emerald-400 bg-emerald-500/10' : 'border-slate-700 text-slate-600'}`}>SMTP</span>
+                              </div>
+                            </td>
+                            <td className="p-4 text-right">
+                              <span className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-bold ${r.valid ? 'bg-emerald-500/10 text-emerald-400 ring-1 ring-emerald-500/20' : 'bg-rose-500/10 text-rose-400 ring-1 ring-rose-500/20'}`}>
+                                {r.valid ? (
+                                  <><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Valid</>
+                                ) : (
+                                  <><span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span> Invalid</>
+                                )}
+                              </span>
+                            </td>
+                          </motion.tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             </div>
           </div>
-        </main>
+        </motion.div>
 
-        {/* Pricing Section */}
-        <section className="mt-20 mb-10">
-          <h2 className="text-3xl font-bold text-center text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 mb-12">
-            Simple, Transparent Pricing
-          </h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-            {/* Free Plan */}
-            <div className="bg-slate-800/50 backdrop-blur-xl border border-slate-700/50 rounded-2xl p-8 hover:border-cyan-500/50 transition-all group">
-              <h3 className="text-xl font-semibold text-cyan-300 mb-4">Starter</h3>
-              <div className="text-4xl font-bold text-white mb-6">$0<span className="text-lg text-slate-500 font-normal">/mo</span></div>
-              <ul className="space-y-4 text-slate-400 mb-8">
-                <li className="flex items-center"><span className="text-cyan-500 mr-2">✓</span> 100 verifications / day</li>
-                <li className="flex items-center"><span className="text-cyan-500 mr-2">✓</span> Standard speed</li>
-                <li className="flex items-center"><span className="text-cyan-500 mr-2">✓</span> CSV Export</li>
-              </ul>
-              <button className="w-full py-3 rounded-xl border border-cyan-500/30 text-cyan-400 font-semibold hover:bg-cyan-500/10 transition-all">Current Plan</button>
+        {/* Info Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mt-12">
+          <div className="p-6 bg-slate-900/40 rounded-2xl border border-slate-800">
+            <div className="h-10 w-10 bg-cyan-500/10 rounded-xl flex items-center justify-center text-cyan-400 mb-4">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
             </div>
-
-            {/* Pro Plan */}
-            <div className="relative bg-slate-800/80 backdrop-blur-xl border border-purple-500/50 rounded-2xl p-8 transform md:-translate-y-4 shadow-2xl shadow-purple-900/20">
-              <div className="absolute top-0 right-0 bg-gradient-to-r from-cyan-500 to-purple-600 text-white text-xs font-bold px-3 py-1 rounded-bl-xl rounded-tr-xl">POPULAR</div>
-              <h3 className="text-xl font-semibold text-white mb-4">Professional</h3>
-              <div className="text-4xl font-bold text-white mb-6">$29<span className="text-lg text-slate-500 font-normal">/mo</span></div>
-              <ul className="space-y-4 text-slate-300 mb-8">
-                <li className="flex items-center"><span className="text-purple-400 mr-2">✓</span> Unlimited verifications</li>
-                <li className="flex items-center"><span className="text-purple-400 mr-2">✓</span> Priority Streaming</li>
-                <li className="flex items-center"><span className="text-purple-400 mr-2">✓</span> API Access</li>
-                <li className="flex items-center"><span className="text-purple-400 mr-2">✓</span> Advanced Analytics</li>
-              </ul>
-              <button className="w-full py-3 rounded-xl bg-gradient-to-r from-cyan-500 to-purple-600 text-white font-bold hover:shadow-lg hover:shadow-purple-500/30 transition-all">Get Started</button>
-            </div>
-
-            {/* Enterprise Plan */}
-            <div className="bg-slate-800/50 backdrop-blur-xl border border-slate-700/50 rounded-2xl p-8 hover:border-purple-500/50 transition-all">
-              <h3 className="text-xl font-semibold text-purple-300 mb-4">Enterprise</h3>
-              <div className="text-4xl font-bold text-white mb-6">$99<span className="text-lg text-slate-500 font-normal">/mo</span></div>
-              <ul className="space-y-4 text-slate-400 mb-8">
-                <li className="flex items-center"><span className="text-purple-500 mr-2">✓</span> Dedicated Server</li>
-                <li className="flex items-center"><span className="text-purple-500 mr-2">✓</span> 99.9% Uptime SLA</li>
-                <li className="flex items-center"><span className="text-purple-500 mr-2">✓</span> Custom Integrations</li>
-              </ul>
-              <button className="w-full py-3 rounded-xl border border-purple-500/30 text-purple-400 font-semibold hover:bg-purple-500/10 transition-all">Contact Sales</button>
-            </div>
+            <h3 className="font-bold text-white mb-2">Lightning Fast</h3>
+            <p className="text-sm text-slate-400">Powered by parallel processing to verify thousands of emails in minutes.</p>
           </div>
-        </section>
+          <div className="p-6 bg-slate-900/40 rounded-2xl border border-slate-800">
+            <div className="h-10 w-10 bg-purple-500/10 rounded-xl flex items-center justify-center text-purple-400 mb-4">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+            </div>
+            <h3 className="font-bold text-white mb-2">Bank-Grade Security</h3>
+            <p className="text-sm text-slate-400">We verify without sending emails. Your data is processed securely and never stored.</p>
+          </div>
+          <div className="p-6 bg-slate-900/40 rounded-2xl border border-slate-800">
+            <div className="h-10 w-10 bg-pink-500/10 rounded-xl flex items-center justify-center text-pink-400 mb-4">
+              <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            </div>
+            <h3 className="font-bold text-white mb-2">Free Forever</h3>
+            <p className="text-sm text-slate-400">Enjoy lifetime free access with our generous starter tier. No credit card required.</p>
+          </div>
+        </div>
       </div>
     </div>
   );

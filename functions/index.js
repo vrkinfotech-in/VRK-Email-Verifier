@@ -17,72 +17,95 @@ const resolveMxRecords = (domain) => {
     });
 };
 
-// Helper to check SMTP
-const checkSmtpConnection = (mxHost, email) => {
-    return new Promise((resolve) => {
-        const socket = new net.Socket();
-        let status = { valid: false, message: "Connection failed" };
-        let step = 0; // 0: Connect, 1: HELO, 2: MAIL FROM, 3: RCPT TO
+// Helper to check SMTP with port fallback
+const checkSmtpConnection = async (mxHost, email) => {
+    const ports = [25, 587, 2525];
 
-        // Set timeout (e.g., 5 seconds) to avoid long waits
-        socket.setTimeout(5000);
+    for (const port of ports) {
+        console.log(`Trying ${mxHost} on port ${port}...`);
+        try {
+            const result = await new Promise((resolve) => {
+                const socket = new net.Socket();
+                let status = { valid: false, message: "Connection failed" };
+                let step = 0; // 0: Connect, 1: HELO, 2: MAIL FROM, 3: RCPT TO
 
-        socket.on("connect", () => {
-            // connected, wait for greeting
-        });
+                // Set timeout (3s per port to stay fast)
+                socket.setTimeout(3000);
 
-        socket.on("data", (data) => {
-            const response = data.toString();
-            const code = parseInt(response.substring(0, 3));
+                socket.on("connect", () => {
+                    // connected
+                });
 
-            // 220 Service ready
-            if (step === 0 && code === 220) {
-                socket.write(`HELO ${process.env.GCLOUD_PROJECT || "verify-app"}.web.app\r\n`);
-                step++;
-            }
-            // 250 Requested mail action okay, completed
-            else if (step === 1 && code === 250) {
-                socket.write(`MAIL FROM:<check@${process.env.GCLOUD_PROJECT || "verify-app"}.web.app>\r\n`);
-                step++;
-            }
-            else if (step === 2 && code === 250) {
-                socket.write(`RCPT TO:<${email}>\r\n`);
-                step++;
-            }
-            else if (step === 3) {
-                if (code === 250) {
-                    status = { valid: true, message: "SMTP/250 OK" };
-                } else {
-                    status = { valid: false, message: `SMTP/${code}: ${response.trim()}` };
-                }
-                socket.write("QUIT\r\n");
-                socket.end();
-                resolve(status);
-            }
-            else {
-                // Unexpected or error code
-                if (step > 0 && code >= 400) {
-                    status = { valid: false, message: `SMTP Error ${code}` };
-                    socket.end();
+                socket.on("data", (data) => {
+                    const response = data.toString();
+                    const code = parseInt(response.substring(0, 3));
+
+                    // 220 Service ready
+                    if (step === 0 && (code === 220 || code === 200)) {
+                        socket.write(`HELO ${process.env.GCLOUD_PROJECT || "verify-app"}.web.app\r\n`);
+                        step++;
+                    }
+                    // 250 Requested mail action okay, completed
+                    else if (step === 1 && (code === 250 || code === 200)) {
+                        socket.write(`MAIL FROM:<check@${process.env.GCLOUD_PROJECT || "verify-app"}.web.app>\r\n`);
+                        step++;
+                    }
+                    else if (step === 2 && (code === 250 || code === 200)) {
+                        socket.write(`RCPT TO:<${email}>\r\n`);
+                        step++;
+                    }
+                    else if (step === 3) {
+                        if (code === 250 || code === 200 || code === 251) {
+                            status = { valid: true, message: `SMTP/${port} OK` };
+                        } else {
+                            status = { valid: false, message: `SMTP/${port}/${code}: ${response.trim()}` };
+                        }
+                        socket.write("QUIT\r\n");
+                        socket.end();
+                        resolve(status);
+                    }
+                    else {
+                        // Unexpected or error code
+                        if (step > 0 && code >= 400) {
+                            status = { valid: false, message: `SMTP/${port} Error ${code}` };
+                            socket.end();
+                            resolve(status);
+                        }
+                    }
+                });
+
+                socket.on("timeout", () => {
+                    status = { valid: false, message: `Timeout ${port}` };
+                    socket.destroy();
                     resolve(status);
-                }
+                });
+
+                socket.on("error", (err) => {
+                    status = { valid: false, message: `Socket Error ${port}: ${err.message}` };
+                    socket.destroy();
+                    resolve(status);
+                });
+
+                socket.connect(port, mxHost);
+            });
+
+            if (result.valid) {
+                return result; // Success!
             }
-        });
+            // If invalid but technically connected (e.g. 550 User Unknown), return it?
+            // Or if "Timeout" / "Socket Error", try next port.
+            if (result.message.includes("Timeout") || result.message.includes("Socket Error") || result.message.includes("Connection failed")) {
+                continue; // Try next port
+            } else {
+                return result; // It connected but failed logic (e.g. user unknown), so stop.
+            }
 
-        socket.on("timeout", () => {
-            status = { valid: false, message: "Connection timed out" };
-            socket.destroy();
-            resolve(status);
-        });
-
-        socket.on("error", (err) => {
-            status = { valid: false, message: `Socket Error: ${err.message}` };
-            socket.destroy();
-            resolve(status);
-        });
-
-        socket.connect(25, mxHost);
-    });
+        } catch (e) {
+            console.error(e);
+            continue;
+        }
+    }
+    return { valid: false, message: "All ports timed out or failed connection" };
 };
 
 exports.verifyEmail = onRequest({ cors: true, maxInstances: 10 }, async (req, res) => {
@@ -128,12 +151,7 @@ exports.verifyEmail = onRequest({ cors: true, maxInstances: 10 }, async (req, re
 
             const topMx = mxRecords[0].exchange;
 
-            // 3. SMTP Check (Handshake)
-            // Note: This is simplified. Real-world SMTP checks need rotation, delays, etc.
-            // Also: Only perform if requested or for specific providers where it's reliable.
-            // Doing this for EVERY email might trigger blocking on Cloud IPs.
-            // But per requirements, we do it.
-
+            // 3. SMTP Check (Handshake) with Port Fallback
             const smtpStatus = await checkSmtpConnection(topMx, email);
 
             return res.json({
