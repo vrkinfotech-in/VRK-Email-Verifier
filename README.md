@@ -77,3 +77,4 @@ npx firebase deploy
 ## Setup Notes
 
 - **Port 25 Blocking**: Local ISPs often block port 25. The app attempts fallback ports (587, 2525), but for 100% accuracy, deploy to Firebase Cloud Functions.
+# VRK-Email-Verifier
